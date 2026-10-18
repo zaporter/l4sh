@@ -22,6 +22,22 @@ local function contents(buf)
 end
 
 local function run()
+  local terminal = require('terminal')
+  local source = '\27[31mred\27[0m\27[s\27[20;1Hmenu\27[uend'
+  local expected = '\27[31mred\27[0m\27' .. '7\27[20;1Hmenu\27' .. '8end'
+  -- PTY read boundaries can split any part of an escape sequence.
+  for split = 0, #source do
+    local filter = terminal.new_filter()
+    assert(filter.feed(source:sub(1, split)) .. filter.feed(source:sub(split + 1)) ..
+      filter.finish() == expected, 'fragmented cursor sequence was corrupted')
+  end
+  local opaque = '\27]2;title\27[s\7\27Ppayload\27[u\27\\' ..
+    '\27[?69h\27[s\27[?69l\27[3;9s'
+  local filter = terminal.new_filter()
+  local pieces = {}
+  for i = 1, #opaque do pieces[#pieces + 1] = filter.feed(opaque:sub(i, i)) end
+  assert(table.concat(pieces) .. filter.finish() == opaque, 'unrelated terminal sequences changed')
+
   vim.o.columns = 160
   vim.o.lines = 45
   vim.o.hidden = false -- The terminal must survive hiding independently of this.
@@ -39,6 +55,17 @@ while :; do
   case "$action" in
     draw) printf '\033[2J\033[Hobsolete text\r\033[2Kclean line\nsecond line\n';;
     long) printf '\033[2J\033[H'; printf '%180s\n' '' | tr ' ' 'x'; printf 'END_LONG\n';;
+    menu)
+      set -- $(stty size)
+      printf '\033[2J\033[HLOG_BEFORE\r\n\033[s\033[%s;1Hw Enable Watch   d Detach\033[uLOG_AFTER\r\n' "$1"
+      ;;
+    query)
+      stty -icanon -echo
+      printf '\033[2;3H\033[6n'
+      IFS= read -r -d R reply
+      printf '%sR' "$reply" > cursor-reply.txt
+      stty icanon
+      ;;
     size) stty size > requested-size.txt;;
     quit) exit 7;;
   esac
@@ -91,6 +118,21 @@ done
   vim.fn.chansend(term.job, 'size\n')
   assert_size(cwd .. '/resized.txt') -- Requires SIGWINCH to reach the child.
 
+  vim.fn.chansend(term.job, 'menu\n')
+  wait_for(function()
+    local lines = vim.api.nvim_buf_get_lines(term.buf, 0, -1, false)
+    local height = vim.api.nvim_win_get_height(output.win)
+    local top = #lines - height + 1
+    return lines[top] == 'LOG_BEFORE' and lines[top + 1] == 'LOG_AFTER' and
+      lines[#lines] == 'w Enable Watch   d Detach'
+  end, 'menu cursor restore erased or misplaced log output')
+
+  vim.fn.chansend(term.job, 'query\n')
+  wait_for(function()
+    return vim.fn.filereadable(cwd .. '/cursor-reply.txt') == 1 and
+      vim.fn.readfile(cwd .. '/cursor-reply.txt')[1] == '\27[2;3R'
+  end, 'terminal query reply did not reach the child PTY')
+
   vim.fn.chansend(term.job, 'long\n')
   wait_for(function()
     return contents(term.buf):gsub('\n', ''):find(string.rep('x', 180) .. 'END_LONG', 1, true)
@@ -123,7 +165,9 @@ done
   local interrupt_term = output.terminals['2']
   wait_for(function() return contents(interrupt_term.buf):find('INT_READY') end,
     'interrupt test did not start')
-  vim.fn.chansend(interrupt_term.job, '\003')
+  wait_for(function() return vim.api.nvim_get_mode().mode == 't' end,
+    'terminal input mode was not entered')
+  vim.api.nvim_input('\003') -- Exercise the renderer's input forwarding too.
   wait_for(function() return exit_code ~= nil end, 'Ctrl-C did not reach the command')
   assert(exit_code == 42, 'foreground signal handler did not run')
 
@@ -144,6 +188,15 @@ done
   assert(failure_code == 127 and failure_message:find('Failed to start terminal'),
     'terminal launch failure was not reported')
   assert(output.terminals['4'] == nil, 'failed terminal was tracked as running')
+
+  output.run_shell("printf 'WIPE_READY\\n'; exec sleep 60", cwd, 5)
+  local wiped = output.terminals['5']
+  wait_for(function() return contents(wiped.buf):find('WIPE_READY') end,
+    'buffer-wipe test did not start')
+  local wiped_job = wiped.job
+  vim.api.nvim_buf_delete(wiped.buf, { force = true })
+  assert(vim.fn.jobwait({ wiped_job }, 5000)[1] ~= -1, 'wiping the buffer left its child running')
+  assert(output.terminals['5'] == nil, 'wiped terminal remained tracked')
 end
 
 local test = coroutine.create(function()

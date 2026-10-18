@@ -3,6 +3,7 @@
 -- Supports streaming output for live updates via file watching
 
 local M = {}
+local terminal = require('terminal')
 
 M.dir = nil
 M.win = nil
@@ -325,11 +326,50 @@ function M.run_shell(cmd, cwd, id, on_exit)
   -- Focus the terminal window and start the job
   vim.api.nvim_set_current_win(M.win)
 
-  -- Use the same shell syntax as sh(), without an intermediate PTY bridge.
+  -- Keep a native PTY for the child and feed its bytes into Neovim's renderer.
+  -- This lets us translate unsupported ANSI cursor save/restore codes before
+  -- libvterm sees them. Input and terminal-query replies go straight to the PTY.
+  local filter = terminal.new_filter()
+  local job
+  local channel = vim.api.nvim_open_term(term_buf, {
+    force_crlf = false,
+    on_input = function(_, _, _, data)
+      if job then vim.fn.chansend(job, data) end
+    end,
+  })
+  -- Unlike a terminal created by jobstart(term=true), the renderer does not
+  -- own this job. Stop the child if the user wipes its buffer directly.
+  vim.api.nvim_create_autocmd('BufWipeout', {
+    buffer = term_buf,
+    once = true,
+    callback = function()
+      if job then
+        vim.fn.jobstop(job)
+        job = nil
+      end
+      local term = M.terminals[id_str]
+      if term and term.buf == term_buf then M.terminals[id_str] = nil end
+    end,
+  })
+  local function render(data)
+    if vim.api.nvim_buf_is_valid(term_buf) then
+      vim.api.nvim_chan_send(channel, data)
+    end
+  end
+  local info = vim.fn.getwininfo(M.win)[1]
   local ok, term_job = pcall(vim.fn.jobstart, { '/bin/sh', '-c', cmd }, {
-    term = true,
+    pty = true,
+    width = math.max(1, vim.api.nvim_win_get_width(M.win) - info.textoff),
+    height = math.max(1, vim.api.nvim_win_get_height(M.win)),
+    env = { TERM = 'xterm-256color' },
     cwd = cwd,
+    on_stdout = function(_, data)
+      render(filter.feed(table.concat(data, '\n')))
+    end,
     on_exit = function(job_id, exit_code, event)
+      job = nil
+      render(filter.finish())
+      render('\r\n[Process exited ' .. exit_code .. ']\r\n')
       vim.schedule(function()
         -- Clean up terminal tracking
         local term = M.terminals[id_str]
@@ -352,6 +392,7 @@ function M.run_shell(cmd, cwd, id, on_exit)
     vim.notify(message, vim.log.levels.ERROR)
     return
   end
+  job = term_job
 
   -- Track this terminal by eval_id
   M.terminals[id_str] = {

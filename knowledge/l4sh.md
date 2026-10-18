@@ -147,9 +147,11 @@ $: shi "python"
 ```
 
 The terminal opens in the output panel. Use `<Esc><Esc>` to exit back to the editor.
-Commands run through `/bin/sh -c` in the Lean session's working directory, directly
-in Neovim's PTY. The command receives the panel's dimensions and resize signals,
-so interactive displays such as `docker compose up` can redraw correctly. Use
+Commands run through `/bin/sh -c` in the Lean session's working directory, using
+a Neovim-managed PTY. The command receives the panel's dimensions and resize signals.
+Output passes through a compatibility filter that translates ANSI cursor
+save/restore sequences into the DEC equivalents supported by Neovim's renderer.
+This keeps `docker compose up` menu redraws from clearing the logs. Use
 `<leader>lt` to return to the running terminal; `Ctrl-C` is passed to the command.
 
 ## Auto-save
