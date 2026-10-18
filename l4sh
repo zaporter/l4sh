@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# l4sh - Lean 4 Shell launcher
+# Starts neovim with l4sh session picker
+
+set -e
+
+if [ -n "${L4SH_SOURCE:-}" ]; then
+  # Installed from the flake: the source lives in the read-only nix store, so
+  # mirror it into a writable project root where lake can build.
+  PROJECT_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/l4sh"
+  mkdir -p "$PROJECT_ROOT"
+  if [ "$(cat "$PROJECT_ROOT/.l4sh-source" 2>/dev/null)" != "$L4SH_SOURCE" ]; then
+    echo "l4sh: syncing $L4SH_SOURCE -> $PROJECT_ROOT" >&2
+    cp -rT --no-preserve=mode,ownership "$L4SH_SOURCE" "$PROJECT_ROOT"
+    (cd "$PROJECT_ROOT" && lake build repl L4sh.Shell)
+    echo "$L4SH_SOURCE" > "$PROJECT_ROOT/.l4sh-source"
+  fi
+else
+  # Project root (where lakefile.toml lives)
+  PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+fi
+
+# Re-exec inside the flake dev shell if not already
+if [ -z "${IN_L4SH_NIX_SHELL:-}" ]; then
+  export IN_L4SH_NIX_SHELL=1
+  exec nix develop "$PROJECT_ROOT" -c "$0" "$@"
+fi
+
+# Ensure sessions directory exists
+mkdir -p "$HOME/.l4sh/sessions"
+
+# L4SH lua directory
+L4SH_DIR="$PROJECT_ROOT/L4sh"
+
+# Handle command line arguments
+case "${1:-}" in
+  --new|-n)
+    # Create new unnamed session directly
+    ACTION="require('session').new_unnamed()"
+    ;;
+  --named)
+    # Create new named session (name as second argument)
+    if [ -n "${2:-}" ]; then
+      ACTION="require('session').new_named('$2')"
+    else
+      ACTION="require('session').new_named()"
+    fi
+    ;;
+  --help|-h)
+    echo "Usage: l4sh [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  (no args)    Open session picker"
+    echo "  --new, -n    Create new unnamed session"
+    echo "  --named [N]  Create new named session (prompts if name not given)"
+    echo "  --help, -h   Show this help"
+    echo ""
+    echo "Session Picker Controls:"
+    echo "  Enter        Open selected session"
+    echo "  Ctrl-n       Create new unnamed session"
+    echo "  Ctrl-a       Create new named session"
+    echo "  Ctrl-d       Delete session (with confirmation)"
+    exit 0
+    ;;
+  *)
+    # Default: open session picker
+    ACTION="require('session').start()"
+    ;;
+esac
+
+# Start neovim with l4sh
+cd "$PROJECT_ROOT"
+nvim \
+  --cmd "let g:l4sh_project_root='$PROJECT_ROOT'" \
+  --cmd "set runtimepath+=$L4SH_DIR" \
+  -c "lua require('init').setup({project_root='$PROJECT_ROOT'}); $ACTION"

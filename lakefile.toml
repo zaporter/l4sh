@@ -1,0 +1,12 @@
+name = "l4sh"
+version = "0.1.0"
+defaultTargets = ["L4sh"]
+
+[[require]]
+name = "repl"
+git = "https://github.com/leanprover-community/repl"
+rev = "v4.34.0"
+
+[[lean_lib]]
+name = "L4sh"
+roots = ["L4sh.Shell"]
