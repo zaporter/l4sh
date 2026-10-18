@@ -66,6 +66,9 @@ Sessions are stored in `~/.l4sh/sessions/`:
 
 ### Keymaps
 
+**Sessions:**
+- `<leader>ls` - Open session picker / switch sessions
+
 **Shell Commands:**
 - `Enter` (in Shell.lean) - Execute `$:` block, auto-add new prompt
 - `<leader>le` - Execute `$:` under cursor
@@ -82,7 +85,6 @@ Sessions are stored in `~/.l4sh/sessions/`:
 
 **Output & Terminal:**
 - `<leader>lo` - Toggle output panel
-- `<leader>ls` - Toggle l4sh status bar
 - `<leader>lt` - Focus terminal (for interactive commands)
 - `<Esc><Esc>` (in terminal) - Exit terminal to editor
 
@@ -145,6 +147,10 @@ $: shi "python"
 ```
 
 The terminal opens in the output panel. Use `<Esc><Esc>` to exit back to the editor.
+Commands run through `/bin/sh -c` in the Lean session's working directory, directly
+in Neovim's PTY. The command receives the panel's dimensions and resize signals,
+so interactive displays such as `docker compose up` can redraw correctly. Use
+`<leader>lt` to return to the running terminal; `Ctrl-C` is passed to the command.
 
 ## Auto-save
 

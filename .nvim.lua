@@ -67,20 +67,22 @@ end
 
 
 -- Process REPL response into output lines
--- Returns: lines, has_error, pty_socket (if shi was used)
+-- Returns: lines, has_error, terminal_request (if shi was used)
 local function process_response(resp)
   local lines = {}
   local has_error = false
-  local pty_socket = nil
+  local terminal_request = nil
 
   if resp.messages then
     for _, msg in ipairs(resp.messages) do
       if msg.severity == 'error' then has_error = true end
       for line in (msg.data or ''):gmatch('[^\n]+') do
-        -- Check for PTY socket marker from shi command
-        local socket = line:match('^{"__l4sh_pty__":%s*"([^"]+)"}')
-        if socket then
-          pty_socket = socket
+        -- Decode the request as JSON to preserve quotes/newlines in commands.
+        local ok, decoded = pcall(vim.json.decode, line)
+        local request = ok and type(decoded) == 'table' and decoded.__l4sh_terminal__
+        if type(request) == 'table' and type(request.cmd) == 'string'
+            and type(request.cwd) == 'string' then
+          terminal_request = request
         else
           table.insert(lines, line)
         end
@@ -95,11 +97,11 @@ local function process_response(resp)
     end
   end
 
-  if #lines == 0 and not pty_socket then
+  if #lines == 0 and not terminal_request then
     table.insert(lines, '(no output)')
   end
 
-  return lines, has_error, pty_socket
+  return lines, has_error, terminal_request
 end
 
 -- Execute a $: block and handle result
@@ -121,23 +123,18 @@ local function execute_block(code, eval_id, bufnr)
   local function on_complete(resp)
     local duration_ms = (vim.uv.hrtime() - t0) / 1e6
 
-    local lines, has_error, pty_socket = process_response(resp)
+    local lines, has_error, terminal_request = process_response(resp)
     local status = has_error and 'err' or 'ok'
 
-    -- Handle PTY socket from shi command
-    if pty_socket then
-      output.stream_finish(id_str, { 'Connecting to PTY: ' .. pty_socket })
+    -- Launch directly in Neovim's PTY; socket bridges lose terminal resizes.
+    if terminal_request and not has_error then
+      output.stream_finish(id_str, lines)
 
-      -- Connect to the Unix socket via socat
-      local connect_cmd = 'socat -,raw,echo=0 UNIX-CONNECT:' .. pty_socket
-      output.run_shell(connect_cmd, M.project_root, eval_id, function(exit_code)
+      output.run_shell(terminal_request.cmd, terminal_request.cwd, eval_id, function(exit_code)
         local final_duration = (vim.uv.hrtime() - t0) / 1e6
         local final_status = exit_code == 0 and 'ok' or 'err'
 
-        -- Clean up socket file
-        os.remove(pty_socket)
-
-        output.save(id_str, { 'PTY session ended', 'Exit code: ' .. exit_code })
+        output.save(id_str, { 'Terminal session ended', 'Exit code: ' .. exit_code })
 
         if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
           local filename = vim.api.nvim_buf_get_name(bufnr)
@@ -385,7 +382,7 @@ end, {})
 -- Keymaps
 vim.keymap.set('n', '<leader>le', M.shell, { desc = 'Execute $: under cursor' })
 vim.keymap.set('n', '<leader>lr', M.reload, { desc = 'Reload definitions' })
-vim.keymap.set('n', '<leader>ls', state.toggle_status, { desc = 'Toggle l4sh status' })
+vim.keymap.set('n', '<leader>ls', ':L4shSessions<CR>', { desc = 'l4sh: session picker/switch', silent = true })
 vim.keymap.set('n', '<leader>lo', function()
   if output.is_visible() then output.hide() else check_cursor_for_output() end
 end, { desc = 'Toggle output panel' })

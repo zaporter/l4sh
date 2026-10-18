@@ -14,7 +14,31 @@ M.session_dir = nil
 M.streaming = {}  -- {eval_id -> {lines = {}, timer = uv_timer, last_size = number}}
 
 -- Terminal sessions: tracks active terminals by eval_id
-M.terminals = {}  -- {eval_id -> {buf = buffer, job = job_id, socket = path}}
+M.terminals = {}  -- {eval_id -> {buf = buffer, job = job_id}}
+
+-- Keep the child PTY aligned with the visible panel, including when a hidden
+-- terminal is shown again. Do not depend on terminal-mode redraw timing.
+local function sync_terminal_size()
+  if not M.win or not vim.api.nvim_win_is_valid(M.win) then return end
+  local buf = vim.api.nvim_win_get_buf(M.win)
+  for _, term in pairs(M.terminals) do
+    if term.buf == buf and term.job then
+      local info = vim.fn.getwininfo(M.win)[1]
+      local width = math.max(1, vim.api.nvim_win_get_width(M.win) - info.textoff)
+      local height = math.max(1, vim.api.nvim_win_get_height(M.win))
+      if term.width ~= width or term.height ~= height then
+        vim.fn.jobresize(term.job, width, height)
+        term.width, term.height = width, height
+      end
+      return
+    end
+  end
+end
+
+vim.api.nvim_create_autocmd({ 'WinResized', 'VimResized', 'BufWinEnter' }, {
+  group = vim.api.nvim_create_augroup('L4shTerminalSize', { clear = true }),
+  callback = function() vim.schedule(sync_terminal_size) end,
+})
 
 function M.init(output_dir, session_dir)
   M.dir = output_dir
@@ -275,10 +299,10 @@ end
 function M.run_shell(cmd, cwd, id, on_exit)
   local id_str = tostring(id)
   local tree_win, tree_width = find_tree_window()
-  local cur_win = vim.api.nvim_get_current_win()
 
-  -- Create new terminal buffer (termopen requires a fresh buffer)
+  -- Create a fresh terminal buffer and keep it when the panel is hidden.
   local term_buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[term_buf].bufhidden = 'hide'
   vim.api.nvim_buf_set_name(term_buf, '[l4sh terminal #' .. id_str .. ']')
 
   -- Create/ensure window
@@ -301,13 +325,15 @@ function M.run_shell(cmd, cwd, id, on_exit)
   -- Focus the terminal window and start the job
   vim.api.nvim_set_current_win(M.win)
 
-  local term_job = vim.fn.termopen(cmd, {
+  -- Use the same shell syntax as sh(), without an intermediate PTY bridge.
+  local ok, term_job = pcall(vim.fn.jobstart, { '/bin/sh', '-c', cmd }, {
+    term = true,
     cwd = cwd,
     on_exit = function(job_id, exit_code, event)
       vim.schedule(function()
         -- Clean up terminal tracking
         local term = M.terminals[id_str]
-        if term then
+        if term and term.job == job_id then
           term.job = nil
           -- Keep buffer around for scrollback viewing
         end
@@ -318,11 +344,21 @@ function M.run_shell(cmd, cwd, id, on_exit)
     end,
   })
 
+  if not ok or term_job <= 0 then
+    local message = 'Failed to start terminal: ' .. tostring(term_job)
+    M.show({ message }, id_str)
+    vim.api.nvim_buf_delete(term_buf, { force = true })
+    if on_exit then on_exit(127) end
+    vim.notify(message, vim.log.levels.ERROR)
+    return
+  end
+
   -- Track this terminal by eval_id
   M.terminals[id_str] = {
     buf = term_buf,
     job = term_job,
   }
+  sync_terminal_size()
 
   -- Enter insert mode for immediate interaction
   vim.cmd('startinsert')
@@ -344,6 +380,7 @@ function M.show_for_id(id)
   local term = M.terminals[id_str]
   if term and term.buf and vim.api.nvim_buf_is_valid(term.buf) then
     vim.api.nvim_win_set_buf(M.win, term.buf)
+    sync_terminal_size()
     M.current_id = id_str
     return
   end

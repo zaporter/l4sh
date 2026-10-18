@@ -130,25 +130,13 @@ def pwd : IO Unit := do
   let pwd ← IO.Process.getCurrentDir
   (← IO.getStdout).putStrLn pwd.toString
 
--- Interactive shell: spawns command with PTY exposed via Unix socket
--- Neovim connects to the socket for full terminal interactivity
+-- Ask Neovim to run the command in its own PTY, so terminal dimensions,
+-- resize signals, input, and exit status reach the command directly.
 def shi (cmd: String): IO Unit := do
-  -- Generate unique socket path using timestamp
-  let now ← IO.monoMsNow
-  let socketPath := s!"/tmp/l4sh-pty-{now}.sock"
-
-  -- Spawn socat to create PTY and expose via Unix socket
-  -- socat creates the PTY, runs the command, and bridges to the socket
-  let _ ← IO.Process.spawn {
-    cmd := "socat"
-    args := #[s!"UNIX-LISTEN:{socketPath},fork", s!"EXEC:{cmd},pty,setsid,ctty,stderr"]
-  }
-
-  -- Give socat a moment to create the socket
-  IO.sleep 50
-
-  -- Return socket path for Neovim to connect
-  (← IO.getStdout).putStrLn ("{\"__l4sh_pty__\": \"" ++ socketPath ++ "\"}")
+  let cwd ← IO.Process.getCurrentDir
+  let request := Json.mkObj [("__l4sh_terminal__", Json.mkObj [
+    ("cmd", toJson cmd), ("cwd", toJson cwd.toString)])]
+  (← IO.getStdout).putStrLn request.compress
 
 open Lean Elab Command Term Meta
 

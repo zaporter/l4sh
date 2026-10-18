@@ -18,7 +18,6 @@
         lean4
         elan
         pigz
-        socat
       ];
 
       l4sh = pkgs.stdenvNoCC.mkDerivation {
