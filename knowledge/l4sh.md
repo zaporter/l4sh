@@ -206,6 +206,11 @@ Execute `$: direnvAllow` to explicitly approve the current project's `.envrc`,
 or run `direnv allow /path/to/project` in another terminal. l4sh never approves
 an environment just by opening a file or changing directory.
 
+Successful environment setup is silent, including direnv status messages and
+warnings from tools such as mise. If setup fails, its diagnostics are shown and
+the command does not run. The command's own stdout and stderr stream normally.
+`sh` removes ANSI formatting from live and saved output; `shi` retains colors.
+
 Project variables apply to child shell commands. They do not modify Neovim,
 the Lean worker, `IO.getEnv`, or arbitrary `IO.Process` calls. Each command gets
 its environment independently, so concurrent commands and fresh workers do not

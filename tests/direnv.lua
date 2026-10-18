@@ -8,7 +8,7 @@ local temp = vim.fn.tempname()
 local project = temp .. "/project 'quoted'"
 local other = temp .. '/other'
 for _, path in ipairs({ project .. '/nested', project .. '/bin', other,
-    temp .. '/config/direnv', temp .. '/data' }) do
+    temp .. '/config/direnv', temp .. '/data', temp .. '/tmp' }) do
   vim.fn.mkdir(path, 'p')
 end
 -- Isolate approval/config files and inherited direnv state from the developer.
@@ -20,10 +20,16 @@ vim.env.XDG_DATA_HOME = temp .. '/data'
 vim.env.L4SH_DIRENV_TEST = 'base'
 vim.env.L4SH_DIRENV_REMOVE = 'present'
 vim.env.LEAN_SHELL_STATE = temp .. '/state.json'
+vim.env.L4SH_SESSION_DIR = temp
+vim.env.TMPDIR = temp .. '/tmp'
 vim.fn.writefile({ vim.json.encode({ version = 1, cwd = temp, files = {}, git = vim.NIL }) },
   vim.env.LEAN_SHELL_STATE)
 vim.fn.writefile({ 'export L4SH_DIRENV_TEST="project value"',
-  'unset L4SH_DIRENV_REMOVE', 'PATH_add bin' }, project .. '/.envrc')
+  'unset L4SH_DIRENV_REMOVE', 'PATH_add bin', 'log_status "using test environment"',
+  'echo "setup stdout"',
+  [=[if [[ -e warn ]]; then printf '\033[33mmise WARN test warning\033[0m\n' >&2; fi]=],
+  [=[if [[ -e fail ]]; then log_error 'SETUP_FAILED'; exit 1; fi]=],
+}, project .. '/.envrc')
 vim.fn.writefile({ 'export L4SH_DIRENV_TEST=other' }, other .. '/.envrc')
 vim.fn.writefile({ '#!/bin/sh', 'printf PATH_OK' }, project .. '/bin/l4sh-direnv-tool')
 vim.fn.setfperm(project .. '/bin/l4sh-direnv-tool', 'rwx------')
@@ -72,8 +78,35 @@ local function run()
   cd(project)
   local text, failed = response('sh "touch must-not-run"')
   assert(failed and text:find('blocked', 1, true), 'blocked .envrc diagnostic was lost: ' .. text)
+  assert(not text:find('\27', 1, true) and not text:find('[31m', 1, true),
+    'blocked .envrc error retained color codes: ' .. text)
   assert(vim.fn.filereadable(project .. '/must-not-run') == 0, 'blocked command executed')
   ok('direnvAllow')
+  text = shell('echo hi')
+  assert(text == 'hi', 'setup output leaked: ' .. text)
+  vim.fn.writefile({}, project .. '/warn')
+  text = shell('echo hi')
+  assert(text == 'hi', 'setup warnings leaked: ' .. text)
+  assert(table.concat(vim.fn.readfile(temp .. '/stream.txt'), '\n') == text,
+    'live output differs from the cleaned final response')
+  assert(shell('echo "command warning" >&2; echo hi') == 'command warning\nhi',
+    'command stderr was hidden along with setup warnings')
+  assert(ok('shsimple "echo hi"') == 'hi', 'shsimple leaked setup output')
+  text, failed = response('sh "echo command-error >&2; exit 17"')
+  assert(failed and text:find('command-error', 1, true) and not text:find('setup stdout', 1, true)
+    and not text:find('mise WARN', 1, true), 'command failure replayed setup output: ' .. text)
+  vim.fn.delete(project .. '/warn')
+  vim.fn.writefile({}, project .. '/fail')
+  text, failed = response('sh "touch must-not-run"')
+  assert(failed and text:find('SETUP_FAILED', 1, true), 'direnv setup errors were hidden')
+  assert(vim.fn.filereadable(project .. '/must-not-run') == 0, 'failed setup ran the command')
+  vim.fn.delete(project .. '/fail')
+  -- ANSI may be split across writes or lines; literal bracket text is ordinary output.
+  text = shell([[printf '\033['; printf '32mgreen\033[0m\n';
+    printf '\033]8;;https://example.com\033\\link\033]8;;\007\n';
+    printf '\033[\n31mred\033[0m\nliteral [0m café\n']])
+  assert(text:find('green\nlink\nred\nliteral [0m café', 1, true),
+    'ANSI cleanup corrupted output: ' .. text)
   assert(shell(probe):find('VALUE=project value REMOVE=missing', 1, true))
   assert(shell('l4sh-direnv-tool'):find('PATH_OK', 1, true), 'PATH changes were ignored')
   assert(ok('shsimple ' .. vim.json.encode(probe)):find('VALUE=project value', 1, true))
@@ -93,7 +126,8 @@ local function run()
 
   cd(project)
   -- Reload changed .envrc contents on the next command, using normal approval.
-  vim.fn.writefile({ 'export L4SH_DIRENV_TEST=changed' }, project .. '/.envrc')
+  vim.fn.writefile({ 'export L4SH_DIRENV_TEST=changed',
+    'echo "setup stdout"', 'echo "setup warning" >&2' }, project .. '/.envrc')
   ok('direnvAllow')
   assert(shell(probe):find('VALUE=changed', 1, true), 'changed .envrc was not loaded')
 
@@ -137,7 +171,26 @@ local function run()
   end, 'terminal output was not rendered')
   local screen = table.concat(vim.api.nvim_buf_get_lines(term.buf, 0, -1, false), '\n')
   assert(screen:find('VALUE=changed REMOVE=present', 1, true), screen)
+  assert(not screen:find('setup', 1, true) and not screen:find('direnv: loading', 1, true),
+    'shi leaked setup output: ' .. screen)
   assert(screen:find('[Process exited 7]', 1, true), 'shi lost exit status or PTY: ' .. screen)
+
+  -- The quiet launcher must still deliver foreground signals to the command.
+  local interrupt = vim.json.decode(ok('shi ' .. vim.json.encode(
+    "trap 'exit 42' INT; printf 'INT_READY\\n'; while :; do sleep 1; done"))).__l4sh_terminal__
+  local interrupt_code
+  output.run_shell(interrupt.cmd, interrupt.cwd, 2, function(code) interrupt_code = code end,
+    interrupt.argv)
+  local interrupt_term = output.terminals['2']
+  wait_for(function()
+    return table.concat(vim.api.nvim_buf_get_lines(interrupt_term.buf, 0, -1, false), '\n')
+      :find('INT_READY', 1, true)
+  end, 'interactive command did not start')
+  vim.fn.chansend(interrupt_term.job, '\003')
+  wait_for(function() return interrupt_code ~= nil end, 'Ctrl-C did not reach the command')
+  assert(interrupt_code == 42, 'quiet launcher changed the signal handler exit status')
+  assert(#vim.fn.glob(temp .. '/tmp/l4sh-direnv.*', false, true) == 0,
+    'setup logs were not removed')
 
   text, failed = response('sh "exit 17"')
   assert(failed and text:find('exit code 17', 1, true), 'sh lost exit status')

@@ -23,18 +23,70 @@ elab "direnv " "off" : command =>
 -- Child processes get the environment; the worker itself stays unchanged.
 initialize active : IO.Ref Bool ← IO.mkRef false
 
+-- Buffer only environment setup. Once direnv reaches the command, discard that
+-- output and restore the original descriptors so command output streams live.
+-- Failed setup retains its diagnostics; a failed command does not replay setup.
+private def launcher : String := r#"
+setup_log=$(mktemp "${TMPDIR:-/tmp}/l4sh-direnv.XXXXXXXX") || exit 1
+trap 'rm -f -- "$setup_log"' 0
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+direnv exec . /bin/sh -c '
+  : > "$2" || exit 1
+  exec /bin/sh -c "$1" 1>&3 2>&4 3>&- 4>&-
+' l4sh-command "$1" "$setup_log" 3>&1 4>&2 >"$setup_log" 2>&1
+command_status=$?
+if [ "$command_status" -ne 0 ]; then
+  cat -- "$setup_log" >&2
+fi
+exit "$command_status"
+"#
+
 def shellArgs (cmd : String) : IO IO.Process.SpawnArgs := do
   if ← active.get then
-    return { cmd := "direnv", args := #["exec", ".", "/bin/sh", "-c", cmd] }
+    return { cmd := "/bin/sh", args := #["-c", launcher, "l4sh-direnv", cmd] }
   return { cmd := "/bin/sh", args := #["-c", cmd] }
 
 end L4sh.Direnv
+
+namespace L4sh.TextOutput
+
+inductive Mode where
+  | text | escape | csi | osc | oscEscape
+  deriving Inhabited
+
+-- The static output pane is plain text. Strip terminal control sequences before
+-- Lean's message formatter drops ESC and leaves fragments like "[0m" behind.
+-- Carry state across lines; getLine already joins fragmented pipe reads.
+def clean (input : String) (mode : Mode := .text) : String × Mode := Id.run do
+  let mut mode := mode
+  let mut output := ""
+  for c in input.toList do
+    match mode with
+    | .text =>
+      if c == '\x1b' then mode := .escape else output := output.push c
+    | .escape =>
+      if c == '[' then mode := .csi
+      else if c == ']' then mode := .osc
+      else mode := .text
+    | .csi =>
+      if c >= '@' && c <= '~' then mode := .text
+      else if c == '\x1b' then mode := .escape
+    | .osc =>
+      if c == '\x07' then mode := .text
+      else if c == '\x1b' then mode := .oscEscape
+    | .oscEscape =>
+      if c == '\\' || c == '\x07' then mode := .text
+      else if c != '\x1b' then mode := .osc
+  return (output, mode)
+
+end L4sh.TextOutput
 
 -- Explicitly approve the current project's .envrc, even when it is blocked.
 -- This bypasses the per-command direnv launcher only for the allow operation.
 def direnvAllow : IO Unit := do
   let result ← IO.Process.output { cmd := "direnv", args := #["allow"] }
-  (← IO.getStdout).putStr (result.stdout ++ result.stderr)
+  (← IO.getStdout).putStr (L4sh.TextOutput.clean (result.stdout ++ result.stderr)).1
   if result.exitCode != 0 then
     throw <| IO.userError s!"direnv allow failed with exit code {result.exitCode}"
 
@@ -123,6 +175,7 @@ partial def sh (cmd: String): IO Unit := do
   let child ← IO.Process.spawn {
     cmd := "/bin/sh"
     args := #["-c", "exec \"$@\" 2>&1", "l4sh", args.cmd] ++ args.args
+    env := args.env ++ #[("NO_COLOR", some "1")]
     stdout := .piped
     stderr := .null
   }
@@ -135,9 +188,10 @@ partial def sh (cmd: String): IO Unit := do
     IO.FS.writeFile path ""
 
   -- Stream output line by line
-  let rec readLoop : IO Unit := do
+  let rec readLoop (mode : L4sh.TextOutput.Mode) : IO Unit := do
     let line ← child.stdout.getLine
     if line.isEmpty then return
+    let (line, mode) := L4sh.TextOutput.clean line mode
     -- Write to stream file for live updates (bypasses REPL capture)
     if let some path := streamFile then
       let h ← IO.FS.Handle.mk path .append
@@ -146,8 +200,8 @@ partial def sh (cmd: String): IO Unit := do
     -- Also write to stdout for final REPL response
     out.putStr line
     out.flush
-    readLoop
-  readLoop
+    readLoop mode
+  readLoop .text
 
   let exitCode ← child.wait
   if exitCode != 0 then
@@ -155,12 +209,12 @@ partial def sh (cmd: String): IO Unit := do
 
 def touchfile (filename: String): IO Unit := do
   let output ← IO.Process.run (← L4sh.Direnv.shellArgs s!"date > {filename}")
-  (← IO.getStdout).putStrLn output
+  (← IO.getStdout).putStrLn (L4sh.TextOutput.clean output).1
   saveState  -- Update state after file operation
 
 def shsimple (cmd: String): IO Unit := do
   let output ← IO.Process.run (← L4sh.Direnv.shellArgs cmd)
-  (← IO.getStdout).putStrLn output
+  (← IO.getStdout).putStrLn (L4sh.TextOutput.clean output).1
   saveState  -- Update state after file operation
 
 def pwd : IO Unit := do
@@ -171,9 +225,10 @@ def pwd : IO Unit := do
 -- resize signals, input, and exit status reach the command directly.
 def shi (cmd: String): IO Unit := do
   let cwd ← IO.Process.getCurrentDir
+  let args ← L4sh.Direnv.shellArgs cmd
   let request := Json.mkObj [("__l4sh_terminal__", Json.mkObj [
     ("cmd", toJson cmd), ("cwd", toJson cwd.toString),
-    ("direnv", toJson (← L4sh.Direnv.active.get))])]
+    ("argv", toJson (#[args.cmd] ++ args.args))])]
   (← IO.getStdout).putStrLn request.compress
 
 open Lean Elab Command Term Meta

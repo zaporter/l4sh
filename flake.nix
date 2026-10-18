@@ -19,6 +19,7 @@
         elan
         pigz
         direnv
+        coreutils
       ];
 
       l4sh = pkgs.stdenvNoCC.mkDerivation {
