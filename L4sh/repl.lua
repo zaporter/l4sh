@@ -78,7 +78,7 @@ local function remove_worker(worker)
     vim.fn.jobstop(worker.job)
   end
   for i, w in ipairs(M.workers) do
-    if w.id == worker.id then
+    if w == worker then
       table.remove(M.workers, i)
       break
     end
@@ -142,7 +142,9 @@ local function create_worker()
       -- Remove from pool on exit
       vim.schedule(function()
         for i, w in ipairs(M.workers) do
-          if w.id == worker.id then
+          -- IDs are reused after restart. A late exit from the old pool must
+          -- not remove a newly initialized worker with the same ID.
+          if w == worker then
             table.remove(M.workers, i)
             break
           end

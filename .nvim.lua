@@ -149,7 +149,7 @@ local function execute_block(code, eval_id, bufnr)
         end
 
         state.refresh()
-      end)
+      end, terminal_request.direnv == true)
       return
     end
 

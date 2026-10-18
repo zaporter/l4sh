@@ -77,7 +77,7 @@ function M.create_session(name)
   local shell_file = session_dir .. "/Shell.lean"
   f = io.open(shell_file, "w")
   if f then
-    f:write("import L4sh.Shell\n\n$: ")
+    f:write("import L4sh.Shell\n-- Uncomment to load each project's .envrc for shell commands:\n-- direnv on\n\n$: ")
     f:close()
   end
 

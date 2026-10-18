@@ -170,6 +170,60 @@ When you use `cd` in l4sh:
 
 Each session maintains its own working directory, persisted across restarts.
 
+## Direnv
+
+Add the following header after the import in `Shell.lean`:
+
+```lean
+import L4sh.Shell
+direnv on
+
+$: cd "/path/to/project"
+$: direnvAllow
+$: sh "echo $DATABASE_URL"
+$: shi "docker compose up"
+
+$: do
+  cd "../another-project"
+  sh "echo $DATABASE_URL"
+```
+
+`direnv on` configures the file; it does not execute anything while the editor
+type-checks or loads it. Execute the `$:` blocks as usual. When adding or changing
+the header in an already loaded session, use `<leader>lr` (`:LeanReload`). Use
+`direnv off`, or remove the header and reload, to return to normal execution.
+
+`sh`, `shsimple`, `touchfile`, and `shi` load the environment using
+[`direnv exec`](https://direnv.net/man/direnv.1.html) before each command. Direnv
+finds the `.envrc` in the current directory or its parents. Commands after l4sh's
+`cd` use the new directory, including inside the same `do` block. Leaving a
+project restores the inherited environment; switching projects does not carry
+the previous project's variables over. Changes to `.envrc` are picked up on the
+next command, subject to direnv approval.
+
+An unapproved `.envrc` blocks the shell command and displays direnv's error.
+Execute `$: direnvAllow` to explicitly approve the current project's `.envrc`,
+or run `direnv allow /path/to/project` in another terminal. l4sh never approves
+an environment just by opening a file or changing directory.
+
+Project variables apply to child shell commands. They do not modify Neovim,
+the Lean worker, `IO.getEnv`, or arbitrary `IO.Process` calls. Each command gets
+its environment independently, so concurrent commands and fresh workers do not
+share mutable project environments. `cd` inside a shell string stays local to
+that child; use l4sh's `cd` between commands to switch projects. A long-running
+`shi` command keeps the environment it started with.
+
+Direnv is included in the Nix package and development shell; other installations
+need `direnv` on `PATH`. No bash/zsh prompt hook is required.
+
+Regression tests (isolated temporary environments and approval records):
+
+```sh
+lake build L4sh.Shell repl
+nvim --headless -u NONE -i NONE -n -c 'luafile tests/direnv.lua'
+nvim --headless -u NONE -i NONE -n -c 'luafile tests/terminal.lua'
+```
+
 ## Lean LSP Integration
 
 Shell.lean files are stored in `~/.l4sh/sessions/` but import from the l4sh project (`import L4sh.Shell`). To make imports resolve correctly even when neovim's cwd is elsewhere:

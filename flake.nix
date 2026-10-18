@@ -18,6 +18,7 @@
         lean4
         elan
         pigz
+        direnv
       ];
 
       l4sh = pkgs.stdenvNoCC.mkDerivation {

@@ -297,7 +297,7 @@ function M.has_terminal(id)
 end
 
 -- Open an interactive shell command in the output panel for a specific eval_id
-function M.run_shell(cmd, cwd, id, on_exit)
+function M.run_shell(cmd, cwd, id, on_exit, use_direnv)
   local id_str = tostring(id)
   local tree_win, tree_width = find_tree_window()
 
@@ -357,7 +357,11 @@ function M.run_shell(cmd, cwd, id, on_exit)
     end
   end
   local info = vim.fn.getwininfo(M.win)[1]
-  local ok, term_job = pcall(vim.fn.jobstart, { '/bin/sh', '-c', cmd }, {
+  local argv = { '/bin/sh', '-c', cmd }
+  if use_direnv then
+    argv = { 'direnv', 'exec', '.', '/bin/sh', '-c', cmd }
+  end
+  local ok, term_job = pcall(vim.fn.jobstart, argv, {
     pty = true,
     width = math.max(1, vim.api.nvim_win_get_width(M.win) - info.textoff),
     height = math.max(1, vim.api.nvim_win_get_height(M.win)),
